@@ -1,0 +1,9 @@
+[project]
+protostar-version = "0.9.1"
+lib-path = "lib"
+cairo-path = ["lib/cairo_contracts/src"]
+
+[contracts]
+Chef_Token = ["src/tokens/Chef_Token.cairo"]
+LP_Token = ["src/tokens/LP_Token.cairo"]
+MasterChef = ["src/MasterChef.cairo"]
