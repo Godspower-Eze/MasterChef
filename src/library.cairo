@@ -48,15 +48,15 @@ func start_block() -> (amount: felt) {
 }
 
 @storage_var
-func pools_info(pid: Uint256) -> (info: PoolInfo) {
+func pools_info(pid: felt) -> (info: PoolInfo) {
 }
 
 @storage_var
-func users_info(pid: Uint256, address: felt) -> (info: UserInfo) {
+func users_info(pid: felt, address: felt) -> (info: UserInfo) {
 }
 
 @storage_var
-func pool_length() -> (value: Uint256) {
+func pool_length() -> (value: felt) {
 }
 
 @storage_var
@@ -87,6 +87,9 @@ namespace MasterChef {
     func initializer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
         token_per_block: Uint256
     ) {
+        with_attr error_message("MasterChef: token_per_block is not a valid Uint256") {
+            uint256_check(token_per_block);
+        }
         let (caller) = get_caller_address();
         Ownable.initializer(caller);
         let (block_number) = get_block_number();
@@ -109,13 +112,14 @@ namespace MasterChef {
         }
         let (block_number) = get_block_number();
         let last_reward_block = block_number;
-        pool_length = pool_length.read();
-        pool_length.write(pool_length + 1);
+        let (old_pool_length) = pool_length.read();
+        let new_pool_length = old_pool_length + 1;
+        pool_length.write(new_pool_length);
         let pool_info = PoolInfo(lp_token, allocation_point, last_reward_block, Uint256(0, 0));
-        let new_pool_length = pool_length.read();
         pools_info.write(new_pool_length, pool_info);
-        total_allocation_point = total_allocation_point.read();
-        total_allocation_point.write(total_allocation_point + allocation_point);
+        let (old_total_allocation_point) = total_allocation_point.read();
+        let (new_total_allocation_point) = SafeUint256.add(old_total_allocation_point, allocation_point);
+        total_allocation_point.write(new_total_allocation_point);
         return ();
     }
 
@@ -127,28 +131,29 @@ namespace MasterChef {
             uint256_check(allocation_point);
         }
         let (pool_info) = pools_info.read(pid);
-        total_allocation_point = total_allocation_point.read();
-        total_allocation_point.write(
-            total_allocation_point - pool_info.allocation_point + allocation_point
-        );
-        pools_info.write(pid, allocation_point);
+        let (old_total_allocation_point) = total_allocation_point.read();
+        let (old_total_allocation_point_plus_allocation_point) = SafeUint256.add(old_total_allocation_point, allocation_point);
+        let (new_total_allocation_point) = SafeUint256.sub_le(old_total_allocation_point_plus_allocation_point, pool_info.allocation_point);
+        total_allocation_point.write(new_total_allocation_point);
+        pools_info.write(pid, PoolInfo(pool_info.lp_token, allocation_point, pool_info.last_reward_block, pool_info.accumalated_reward_per_share));
         return ();
     }
 
     func getMultiplier{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
         _from: felt, to: felt
-    ) -> (Uint256,) {
-        let (bonus_end_block) = bonus_end_block.read();
-        return getMultiplierPure(bonus_end_block, _from, to);
+    ) -> (multiplier: Uint256) {
+        let (block) = bonus_end_block.read();
+        return getMultiplierPure(block, _from, to);
     }
 
-    func pendingChefToken{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(pid: felt, user: felt) -> (value: Uint256) {
-        let pool_info = pools_info.read(pid);
-        let user_info = users_info.read(pid, user);
+    func pendingChefToken{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(_from: felt, to: felt, pid: felt, user: felt) -> (value: Uint256) {
+        let (multiplier) = getMultiplier(_from, to);
+        let (pool_info) = pools_info.read(pid);
+        let (user_info) = users_info.read(pid, user);
         let (contract_address) = get_contract_address();
         let (lp_supply) = IERC20.balanceOf(contract_address=pool_info.lp_token, account=contract_address);
         let (block_number) = get_block_number();
-        return pendingChefTokenPure(pool_info, user_info, BONUS_MULTIPLIER, lp_supply, block_number);
+        return pendingChefTokenPure(pool_info, user_info, multiplier, lp_supply, block_number);
     }
 
     func updatePool{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(pid: felt) {
@@ -239,20 +244,20 @@ namespace MasterChef {
     ) -> (multiplier: Uint256) {
         let to_check = is_le(to, bonus_end_block);  // `to` value less than or equal to `bonus_end_block`
         let from_check = is_le(bonus_end_block, _from);  // `_from` value greater than or equal to `bonus_end_block`
-        if (to_check == 1) {
+        if (to_check == TRUE) {
             let block_diff = to - _from;
             let block_diff_with_multiplier = block_diff * BONUS_MULTIPLIER;
-            return (multiplier=block_diff_with_multiplier);
+            return (multiplier=Uint256(block_diff_with_multiplier, 0));
         } else {
             if (from_check == 1) {
                 let block_diff = to - _from;
-                return (multiplier=block_diff);
+                return (multiplier=Uint256(block_diff, 0));
             } else {
                 let block_diff = bonus_end_block - _from;
                 let block_diff_with_multiplier = block_diff * BONUS_MULTIPLIER;
                 let block_diff_in_future = to - bonus_end_block;
                 let multiplier = block_diff_with_multiplier * block_diff_in_future;
-                return (multiplier=multiplier);
+                return (multiplier=Uint256(multiplier, 0));
             }
         }
     }
@@ -267,8 +272,11 @@ namespace MasterChef {
         %}
         let (lp_supply_is_zero) = uint256_eq(lp_supply, Uint256(0, 0));
         if (check == TRUE and lp_supply_is_zero == FALSE){
-            let (multiplier_times_token_per_block) = SafeUint256.mul((SafeUint256.mul(multiplier, chef_token_per_block)), pool.allocation_point);
-            let (chef_token_reward, _) = SafeUint256.div_rem(multiplier_times_token_per_block, total_allocation_point.read());
+            let (_chef_token_per_block) = chef_token_per_block.read();
+            let (multiplier) = SafeUint256.mul(multiplier, _chef_token_per_block);
+            let (multiplier_times_token_per_block) = SafeUint256.mul(multiplier, pool.allocation_point);
+            let (_total_allocation_point) = total_allocation_point.read();
+            let (chef_token_reward, _) = SafeUint256.div_rem(multiplier_times_token_per_block, _total_allocation_point);
             let (reward_times_precision) = SafeUint256.mul(chef_token_reward, Uint256(SHARE_PRECISION_VALUE, 0));
             let (share, _) = SafeUint256.div_rem(reward_times_precision, lp_supply);
             accumalated_reward_per_share = SafeUint256.add(accumalated_reward_per_share, share);
